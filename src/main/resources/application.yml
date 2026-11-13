@@ -1,0 +1,19 @@
+spring:
+  application:
+    name: testcontainers-mysql-demo-v2
+  profiles:
+    default: dev
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+server:
+  port: 8080
+
+logging:
+  level:
+    ru.demo.mysql: INFO

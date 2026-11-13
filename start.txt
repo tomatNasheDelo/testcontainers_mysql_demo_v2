@@ -1,0 +1,138 @@
+Spring Boot MySQL demo v2: clean layers + Flyway + Testcontainers
+====================================================================
+
+Технологии
+----------
+
+- Java 17, Spring Boot 3.4, Gradle Kotlin DSL
+- Spring Web, Spring Data JPA / Hibernate, Bean Validation
+- MySQL 8.4 для локал��ного приложения через Docker Compose
+- Flyway для версии схемы базы данных
+- Testcontainers запускает отдельную настоящую MySQL 8.4 для интеграционного теста
+- Профили Spring `dev` и `test`
+
+Архитектура и элементы
+----------------------
+
+- `api/CustomerController` — REST endpoints; принимает валидируемый DTO.
+- `api/dto/` — request/response модели. JPA сущности наружу не сериализуются, поэтому нет циклической сериализации двусторонней связи.
+- `api/ApiExceptionHandler` — единый JSON-ответ для ошибок валидации, 404 и конфликтов email.
+- `service/CustomerService` — транзакционная бизнес-логика и преобразование entity в DTO.
+- `repository/CustomerRepository` — Spring Data JPA; `@EntityGraph` загружает заказы для read-запросов.
+- `domain/Customer` — родитель; `domain/CustomerOrder` — дочерняя сущность. Связь `@OneToMany` / `@ManyToOne`, каскадное сохранение и orphan removal.
+- `resources/db/migration/V1__create_customer_and_orders.sql` — версионируемая Flyway схема.
+- `config/DevDataConfiguration` — только в `dev` профиль добавляет пример и пишет статус через SLF4J.
+- `CustomerServiceMySqlIT` — Spring интеграционный тест на отдельной настоящей MySQL в контейнере.
+- `compose.yaml` — MySQL для запуска самого приложения.
+
+Две базы данных / изоляция
+--------------------------
+
+Это два независимых экземпляра/окружения MySQL:
+
+1. **База приложения** `app_demo` — запускается пользователем через Docker Compose, данные сохраняются в Docker volume `mysql_data`.
+2. **Тестовая база** `customer_test` — создаётся в отдельном временном MySQL контейнере Testcontainers для интеграционного теста и удаляется после тестов.
+
+Тесты не используют и не изменяют базу приложения. При запуске Gradle тестов Testcontainers должен иметь доступ к Docker daemon.
+
+Требования
+----------
+
+- JDK 17+
+- Gradle 8+
+- Docker Engine + Docker Compose plugin
+- Свободные порты 3306 (dev DB) и 8080 (Spring Boot)
+
+Запуск приложения (`dev` profile)
+---------------------------------
+
+В терминале из корня проекта запусти MySQL:
+
+```bash
+docker compose up -d mysql
+docker compose ps
+```
+
+Дождись статуса `healthy`, затем стартуй Spring Boot (профиль `dev` включён по умолчанию):
+
+```bash
+gradle bootRun
+```
+
+Альтернативно указать профиль явно:
+
+```bash
+gradle bootRun --args='--spring.profiles.active=dev'
+```
+
+Проверить API:
+
+```bash
+curl http://localhost:8080/api/customers
+curl http://localhost:8080/api/customers/1
+```
+
+Создать клиента с заказами:
+
+```bash
+curl -i -X POST http://localhost:8080/api/customers \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Charlie Brown","email":"charlie@example.com","city":"London","orders":[{"product":"Tablet","total":540.00},{"product":"Cover","total":30.00}]}'
+```
+
+На старте `dev` профиля `CommandLineRunner` создаёт demo customer при пустой базе и пишет итог в приложение лог. После остановки приложения останови базу:
+
+```bash
+docker compose down
+```
+
+Данные volume сохраняются. Удалить контейнеры вместе с данными:
+
+```bash
+docker compose down -v
+```
+
+Предупреждение: `-v` удалит все локальные данные этого примера.
+
+Интеграционный тест на Testcontainers (`test` profile)
+------------------------------------------------------
+
+Тест запускает временный контейнер MySQL 8.4 автоматически. Spring Boot подключается к нему по `@ServiceConnection`, затем Flyway применяет те же миграции, что и в приложении. Никакой запущенный compose DB не нужен для тестов.
+
+```bash
+gradle test
+```
+
+Только этот интеграционный тест:
+
+```bash
+gradle test --tests 'ru.demo.mysql.CustomerServiceMySqlIT'
+```
+
+Testcontainers workflow:
+
+1. JUnit `@Testcontainers` запускает `MySQLContainer` с базой `customer_test`.
+2. Boot `@ServiceConnection` подставляет JDBC connection details этого контейнера.
+3. Spring profile `test` отключает demo seed data.
+4. Flyway применяет `V1__...sql`, Hibernate сверяет отображение с реальной схемой (`ddl-auto: validate`).
+5. Тест проверяет сохранение Customer и связанных Order через настоящий MySQL.
+6. После завершения теста Testcontainers удаляет временный контейнер.
+
+Тестирование требует работающий Docker daemon. Первый запуск скачает образ MySQL; это может занять время.
+
+Валидация и ошибки API
+----------------------
+
+- `name`, `email`, продукт заказа обязательны.
+- Email должен быть валидным и уникальным.
+- Сумма заказа должна быть больше нуля.
+- Для невалидного JSON DTO возвращается HTTP 400, дублирующийся email — 409, отсутствующий клиент — 404.
+
+Конфигурация
+------------
+
+- Общие настройки: `src/main/resources/application.yml`.
+- Dev DB: `application-dev.yml`, можно переопределить `DB_URL`, `DB_USERNAME`, `DB_PASSWORD`.
+- Test: `application-test.yml` плюс динамические connection details контейнера.
+- Пароли в compose — только демонстрационные локальные значения; не использовать в production.
+- В production хранить секреты в secret manager/env, использовать миграции и `ddl-auto: validate`.

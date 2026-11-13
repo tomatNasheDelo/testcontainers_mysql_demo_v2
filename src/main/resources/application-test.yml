@@ -1,0 +1,9 @@
+spring:
+  jpa:
+    show-sql: false
+  flyway:
+    clean-disabled: true
+
+app:
+  demo-data:
+    enabled: false
